@@ -53,8 +53,12 @@ ITEMS = {
     "Elixir of Power":       {"type": "consumable", "effect": "attack",   "value": 5,    "desc": "+5 attack permanently"},
     "Rage Potion":           {"type": "consumable", "effect": "attack",   "value": 8,    "desc": "+8 attack permanently"},
     "Smoke Bomb":            {"type": "consumable", "effect": "flee",     "value": 1,    "desc": "Guarantees escape from combat"},
+    "Ancient Key":           {"type": "consumable", "effect": "key",      "value": 50,   "desc": "Unlocks a hidden vault (+50g)"},  # added
     "Angelic Addie's Sword": {"type": "weapon",     "effect": "damage",   "value": 9999, "desc": "⚡ Two-Handed Divine Blade — instantly slays any foe"},
 }
+
+#NOTE: ABOVE ROOM 5 ITEMS
+LATE_ITEMS = {"Cursed Blade", "Plate Armor", "Steel Sword", "Ancient Key"}  # added
 
 MONSTERS = [
     {"name": "Goblin Scout",     "hp": 25,  "attack": 7,  "defense": 1,  "xp": 15,  "gold": 5,  "loot": "Gold Coin",            "ability": None},
@@ -205,11 +209,11 @@ class Player:
     def status(self):
         hr()
         bar_len = 22
-        filled  = int((self.hp / self.max_hp) * bar_len)
+        filled  = max(0, int((self.hp / self.max_hp) * bar_len))  # fix: clamp to 0 so bar never goes negative
         hp_col  = GREEN if self.hp > self.max_hp * 0.5 else (YELLOW if self.hp > self.max_hp * 0.25 else RED)
         bar     = clr("█" * filled, hp_col) + clr("░" * (bar_len - filled), RED)
         tags    = ""
-        if self.poisoned: tags += clr(" [POISONED]", GREEN)
+        if self.poisoned: tags += clr(" [POISONED]", MAGENTA)  # fix: was GREEN, confusing with HP bar
         if self.cursed:   tags += clr(" [CURSED]",   MAGENTA)
         print(f"  {clr(self.name, BOLD)} | Lv.{self.level} | [{bar}] {self.hp}/{self.max_hp}{tags}")
         print(f"  ATK:{self.total_attack()}  DEF:{self.total_defense()}  XP:{self.xp}/{self.xp_next}  Gold:{self.gold}g  Kills:{self.kills}")
@@ -240,10 +244,11 @@ class Player:
         slow_print(clr(f"\n  ✨ LEVEL UP → Lv.{self.level}! HP+30 restored, stats increased!", YELLOW))
 
     def tick_status(self):
+        """Returns True if the player died this tick."""
         if self.poisoned:
             dmg = random.randint(4, 10)
             self.hp -= dmg
-            slow_print(clr(f"  ☠  Poison burns through you! -{dmg} HP", GREEN))
+            slow_print(clr(f"  ☠  Poison burns through you! -{dmg} HP", MAGENTA))  # fix: use MAGENTA for poison
             self.poison_turns -= 1
             if self.poison_turns <= 0:
                 self.poisoned = False
@@ -251,13 +256,18 @@ class Player:
         if self.weapon == "Cursed Blade":
             self.hp -= 3
             slow_print(clr("  💀 The Cursed Blade drains your life... -3 HP", MAGENTA))
+        return self.hp <= 0  # fix: caller can now check if player died
 
     def show_inventory(self):
         if not self.inventory:
-            print(clr("  Your inventory is empty.", YELLOW)); return
+            print(clr("  Your inventory is empty.", YELLOW)); return False
         print(clr("\n  📦 Inventory:", BOLD))
         for i, itm in enumerate(self.inventory, 1):
-            print(f"    {i}. {itm} — {ITEMS[itm]['desc']}")
+            tag = ""
+            if itm == self.weapon: tag = clr(" [equipped]", GREEN)
+            elif itm == self.armor: tag = clr(" [equipped]", GREEN)
+            print(f"    {i}. {itm} — {ITEMS[itm]['desc']}{tag}")  # fix: show equipped status
+        return True
 
     def use_item(self):
         consumables = [i for i in self.inventory if ITEMS[i]["type"] == "consumable"]
@@ -265,7 +275,7 @@ class Player:
             print(clr("  No usable items!", YELLOW)); return None
         print(clr("\n  🧪 Use which item?", BOLD))
         for i, itm in enumerate(consumables, 1):
-            print(f"    {i}. {itm}")
+            print(f"    {i}. {itm} — {ITEMS[itm]['desc']}")  # fix: show item desc in menu
         print("    0. Cancel")
         pick = input("  > ").strip()
         if pick == "0" or not pick.isdigit(): return None
@@ -283,10 +293,17 @@ class Player:
             self.attack += value
             slow_print(clr(f"  ⚡ {itm}: Attack permanently +{value}!", YELLOW))
         elif effect == "antidote":
-            self.poisoned = False; self.poison_turns = 0
-            slow_print(clr("  💚 Poison cured!", GREEN))
+            if self.poisoned:
+                self.poisoned = False; self.poison_turns = 0
+                slow_print(clr("  💚 Antidote taken. Poison cured!", GREEN))
+            else:
+                self.inventory.append(itm)  # fix: refund antidote if not poisoned
+                slow_print(clr("  You're not poisoned! Antidote returned.", YELLOW))
         elif effect == "flee":
             return "smoke_bomb"
+        elif effect == "key":
+            self.gold += value  # fix: Ancient Key now actually does something (+50g)
+            slow_print(clr(f"  🔑 The key opens a hidden vault! +{value}g!", YELLOW))
         return None
 
     def equip_item(self, itm):
@@ -304,7 +321,35 @@ class Player:
             self.inventory.remove(itm)
             slow_print(clr(f"  🛡  Equipped {itm}!", GREEN))
 
-# COMP SYS 
+
+# ─── Inventory Menu (shared between combat and exploration) ───────────────────
+# Added: unified menu replaces separate show_inventory + use_item calls
+def inventory_menu(player):
+    """Show inventory + optionally use or equip an item. Returns 'smoke_bomb' or None."""
+    has_items = player.show_inventory()
+    if not has_items:
+        return None
+    print(clr("\n  [1] Use consumable   [2] Equip gear   [0] Cancel", BOLD))
+    act = input("  > ").strip()
+    if act == "1":
+        return player.use_item()
+    elif act == "2":
+        gear = [i for i in player.inventory
+                if ITEMS[i]["type"] in ("weapon", "armor")
+                and i != player.weapon and i != player.armor]
+        if not gear:
+            print(clr("  No unequipped gear in inventory.", YELLOW))
+            return None
+        print(clr("\n  Equip which?", BOLD))
+        for i, g in enumerate(gear, 1):
+            print(f"    {i}. {g} — {ITEMS[g]['desc']}")
+        print("    0. Cancel")
+        pick = input("  > ").strip()
+        if pick.isdigit() and 1 <= int(pick) <= len(gear):
+            player.equip_item(gear[int(pick) - 1])
+    return None
+
+# ─── Combat ──────────────────────────────────────────────────────────────────
 def combat(player, monster_template, ambush=False):
     monster = dict(monster_template)
     monster["max_hp"] = monster["hp"]
@@ -368,7 +413,7 @@ def combat(player, monster_template, ambush=False):
             enemy_dmg  = 0
 
             if ability == "poison" and not player.poisoned and random.random() < 0.40:
-                slow_print(clr(f"  🕷  {monster['name']} injects venom! POISONED!", GREEN))
+                slow_print(clr(f"  🕷  {monster['name']} injects venom! POISONED!", MAGENTA))  # fix: use MAGENTA for poison
                 player.poisoned = True
                 player.poison_turns = random.randint(3, 5)
                 enemy_dmg = max(1, monster["attack"] // 2 - player.total_defense())
@@ -383,7 +428,9 @@ def combat(player, monster_template, ambush=False):
                 enemy_dmg = max(1, monster["attack"] - player.total_defense() + random.randint(-2, 4))
                 heal_amt  = enemy_dmg // 2
                 monster["hp"] = min(monster["max_hp"], monster["hp"] + heal_amt)
-                slow_print(clr(f"  🩸 Lifesteal! {monster['name']} heals {heal_amt} HP!", MAGENTA))
+                slow_print(clr(f"  🩸 {monster['name']} drains your life for {enemy_dmg}! Heals {heal_amt} HP!", MAGENTA))
+                player.hp -= enemy_dmg  # fix: was healed monster but never damaged player
+                enemy_dmg = 0
 
             elif ability == "rend" and random.random() < 0.30:
                 enemy_dmg = max(1, monster["attack"] - player.total_defense() + random.randint(5, 12))
@@ -410,7 +457,7 @@ def combat(player, monster_template, ambush=False):
             if player.poisoned:
                 p_dmg = random.randint(2, 5)
                 player.hp -= p_dmg
-                slow_print(clr(f"  ☠  Poison: -{p_dmg} HP", GREEN))
+                slow_print(clr(f"  ☠  Poison: -{p_dmg} HP", MAGENTA))  # fix: match poison colour theme
 
         elif choice == "2":
             result = player.use_item()
@@ -423,7 +470,7 @@ def combat(player, monster_template, ambush=False):
                 slow_print(clr("  You slip away into the shadows!", YELLOW))
                 return False
             else:
-                fd = max(1, monster["attack"] - player.total_defense() // 2)
+                fd = max(1, (monster["attack"] - player.total_defense()) // 2 + random.randint(1, 6))  # fix: was monster["attack"] - (defense//2) due to precedence
                 player.hp -= fd
                 slow_print(clr(f"  Caught fleeing! -{fd} HP!", RED))
         else:
@@ -458,7 +505,9 @@ def ev_mimic(player, room_num):
         slow_print(clr("  You back away slowly. Smart move.", YELLOW))
 
 def ev_item(player, room_num):
-    pool = [k for k in ITEMS if k != "Angelic Addie's Sword"]
+    pool = [k for k in ITEMS
+            if k != "Angelic Addie's Sword"
+            and not (k in LATE_ITEMS and room_num < 5)]  # fix: late-game items blocked in early rooms
     itm  = random.choice(pool)
     slow_print(clr(f"\n  ✨ You find something: {clr(itm, BOLD)} ({ITEMS[itm]['desc']})", CYAN))
     player.inventory.append(itm)
@@ -510,8 +559,8 @@ def ev_trap(player, room_num):
     elif t == "fire_vent":
         slow_print(clr("\n  🔥 You smell sulphur a split second too late...", YELLOW))
         if dodge:
-            slow_print(clr("  You roll aside! Only singed for 8 damage.", YELLOW))
-            player.hp -= 8
+            slow_print(clr("  You dive to the side! Just 4 damage from the heat.", YELLOW))  # fix: message said dodged but still did 8 damage
+            player.hp -= 4
         else:
             dmg = random.randint(18, 30)
             player.hp -= dmg
@@ -759,9 +808,7 @@ def explore_room(player, room, room_num):
             print(clr("  [1] Press on   [2] Use item   [3] Status   [4] Bail out (lose room progress)", BOLD))
             act = input("  > ").strip()
             if act == "2":
-                player.show_inventory()
-                if input(clr("  Use a consumable? (y/n): ", BOLD)).strip().lower() == "y":
-                    player.use_item()
+                inventory_menu(player)  # fix: replaced with unified inventory_menu
             elif act == "3":
                 player.status()
                 pause()
@@ -824,7 +871,7 @@ def shrine(player):
     else:
         slow_print(clr(f"  You have no gold to offer ({cost}g needed).", YELLOW))
 
-def main():
+def run_game():
     os.system("cls" if os.name == "nt" else "clear")
     print(clr("""
 ╔════════════════════════════════════════╗
@@ -858,8 +905,8 @@ def main():
 
         if player.poisoned or player.weapon == "Cursed Blade":
             slow_print(clr("\n  ⏳ Status effects tick...", YELLOW))
-            player.tick_status()
-            if player.hp <= 0: break
+            died = player.tick_status()  # fix: use return value instead of re-checking hp
+            if died: break
 
         #NOTE: THIS IS THE ONLY PLACE IN THE GAME WHERE ROOM 5 CAN BE SPECIAL NOW IT HAS A TINY CHANCE TO SPAWN A LEGENDARY SWORD THAT KILLS ANY MONSTER IN ONE HIT AND LOOKS REALLY COOL THE NAME OF THE SWORD IS A REFERENCE IS I'AM CUZ I LOVE ANGELS <3
         if room_num == 5:
@@ -939,10 +986,15 @@ def main():
     print(f"    Rooms:   {player.rooms_cleared}/{total_rooms}")
     hr2()
 
-    if input(clr("\n  Play again? (y/n): ", BOLD)).strip().lower() == "y":
-        main()
-    else:
-        slow_print(clr("\n  Farewell, adventurer. May your next life be kinder.\n", CYAN))
+    # End of run_game()
+
+# fix: replaced recursion with loop — prevents stack overflow on repeated replays
+def main():
+    while True:
+        run_game()
+        if input(clr("\n  Play again? (y/n): ", BOLD)).strip().lower() != "y":
+            slow_print(clr("\n  Farewell, adventurer. May your next life be kinder.\n", CYAN))
+            break
 
 if __name__ == "__main__":
     main()
