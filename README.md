@@ -25,7 +25,7 @@ Requirements: Python 3.8+ (any modern Python 3 will work).
 Run the game from the project folder:
 
 ```bash
-python game_v1.90.py
+python dnds.py
 ```
 
 Follow on-screen prompts. Typical inputs are numeric menu choices and simple `y/n` answers.
